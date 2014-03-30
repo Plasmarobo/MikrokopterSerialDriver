@@ -1,0 +1,212 @@
+#include "kopter_control.hpp"
+#include "serial_frame.hpp"
+
+KopterController::KopterController(SerialChannel *serialinterface)
+{
+	sc = serialinterface;
+	//SerialFrame: Aquire Debug
+	unsigned char dat=0;
+	char *buffer; int bytes_read=16;;
+	SerialFrame sf('a', NC_ADDR, 1, &dat);
+	for(int i = 0; i < 32; ++i)
+	{
+		dat = i;
+		sf->SetData(1, &dat);
+		sf->Send(sc);
+		sf->Recieve(sc);
+		buffer = sf->GetData(bytes_read);
+		memcpy(analog_debug_names[i], buffer, bytes_read);
+		analog_debugs_names[i][bytes_read] = '\0';
+	}
+	sf->SetID('v');
+	sf->SetData(0, &dat);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	version = *( (VersionData*) sf->GetData(bytes_read));
+	if(bytes_read != sizeof(VersionData))
+		printf("Unexpected data received\n");
+ 	
+	sf->SetID('g');
+	sf->SetData(0, &dat);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	ctrl = *( (ExternControl*) sf->GetData(bytes_read));
+	if(bytes_read != sizeof(Externcontrol))
+		printf("Unexpected data recieved\n");
+	waypoint_ptr = 0;
+	log_on = faslse;
+}
+
+KopterController::~KopterController()
+{
+	delete [] debugdata;
+} 
+
+void KopterController::EngineTest()
+{
+	unsigned char power[16];
+	for(int i = 0; i < 16; ++i)
+		power[i] = 0x88;
+	SerialFrame sf('t', FC_ADDR, 16, &power);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	usleep(1000);
+	for(int i = 0; i < 16; ++i)
+		power[i] = 0x0;
+	sf->Send(sc);
+	sf->Recieve(sc);
+}
+
+void KopterController::AssumeControl()
+{
+	ctrl.Config = 1;
+	ctrl.Gas = 0x88;
+	ctrl.Frame = 31;
+	ctrl.Digital[0] = 0;
+	ctrl.Digital[1] = 0;
+	ctrl.RemoteButtions = 0;
+	ctrl.Nick = 0;
+	ctrl.Roll = 0;
+	ctrl.Gier = 0;
+	ctrl.Height = 1;
+	ctrl.free = 0;
+		
+	SerialFrame sf('b', FC_ADDR, sizeof(ExternControl), &ctrl);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	unsigned int sz = 1;
+	unsigned char f = *((unsigned char*) sf->GetData(sz));
+	if(f != ctrl.Frame)
+		printf("Error Assuming Control\n");
+}
+
+void KopterController::RelinquishControl()
+{
+	ctrl.Config = 0;
+	ctrl.Gas = 0x0;
+	ctrl.Digital[0] = 0;
+	ctrl.Digital[1] = 1;
+	ctrl.RemoteButtons = 0;
+	ctrl.Nick = 0;
+	ctrl.Roll = 0;
+	ctrl.Gier = 0;
+	ctrl.Height = 1;
+	ctrl.free = 0;
+
+	SerialFrame sf('b', FC_ADDR, sizeof(ExternControl), &ctrl);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	unsigned int sz = 1;
+	unsigned char f = *((unsigned char*) sf->GetData(sz));
+	if(f != ctrl.Frame)
+		printf("Error Relinquishing Control\n");
+}
+
+void KopterController::GetMixer()
+{
+	SerialFrame sf('n', FC_ADDR, 0, 0);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	unsigned int sz = sizeof(MixerTable);
+	mt = *((MixerTable*)sf->GetData(sz));
+}
+
+void KopterController::GetBLParameter()
+{
+	//Stub
+}
+
+void KopterController::SetTarget(Waypoint target)
+{
+	SerialFrame sf('s', NC_ADDR, sizeof(Waypoint), &target);
+	sf->Send(sc);
+}
+
+void KopterController::DebugPoll(unsigned char v)
+{
+	unsigned char centiseconds = 4;
+	debugdata_size = 400 / centiseconds;
+	delete [] debugdata;
+	debugdata = new DebugOut[debugdata_size]; 
+	SerialFrame sf('d', FC_ADDR, 1, &cenitseconds);
+	sf->Send(sc);
+	unsigned int sz = sizeof(DebugOut);
+	for(int i = 0; i < debugdata_size; ++i)
+	{
+		sf->Recieve(sc);
+		debugdata[i] = *((DebugOut*)sf->GetData(size));
+		if(size != sizeof(DebugOut))
+			printf("Unexpected size of debug structure\n");
+	} 
+	if(log_on)
+	{
+		//Stub Write out debug values in nice format
+	}
+}
+
+NaviData KopterController::PullNaviData()
+{
+	unsigned char interval = 0;
+	SerialFrame sf('o',NC_ADDR, 1, &interval);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	unsigned int size = sizeof(NaviData);
+	navdata = *((NaviData*)sf->GetData(size));
+	if(size != sizeof(NaviData))
+		printf("Unexpected size of Navi structure\n");
+	return navdata;
+}
+
+Paramset KopterController::PullParamset()
+{
+	unsigned char index = 1;
+	SerialFrame sf('q', FC_ADDR, 1, &index);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	unsigned int size = sizeof(Paramset)+2;
+	char *buffer = sf->GetData(size);
+	ps = *((Paramset*)(buffer+2));
+	unsigned char index = buffer[0];
+	unsigned char version = buffer[1];
+	return ps;
+}
+
+void KopterController::EnqueueWaypoint(Waypoint target)
+{
+	waypoints[waypoint_ptr++] = target;
+	SerialFrame sf('w', NC_ADDR, sizeof(Waypoint), &target);
+	sf->Send(sc);
+	sf->Recieve(sc);
+	unsigned char wp_count=0;
+	unsigned int size = 1;
+	wp_count = *(sf->GetData(size));
+	if(wp_count != target)
+	{
+		waypoint_ptr = 0;
+		printf("Waypoint list cleared: May not be error\n");
+	}
+}
+
+void KopterController::ClearWaypoints()
+{
+	//Stub
+}
+
+DebugOut *KopterController::GetDebugOut(unsigned int &size)
+{
+	size = debugdata_size;
+	return debugdata;
+}
+
+void KopterController::PrintDebug()
+{
+	for(int j = 0; j < 32; ++j)
+	{
+		printf("%s\t", analog_debug_names[j]);
+		for(int i = 0; i < debugdata_Size; ++i)
+		{
+			printf("%d ", debugdata[i].analog[j]);
+		}
+		printf("\n");
+	}
+}
